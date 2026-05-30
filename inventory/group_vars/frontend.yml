@@ -1,0 +1,5 @@
+---
+ansible_user: serverem
+# ansible_ssh_pass: !vault |   # use ansible-vault
+#   $ANSIBLE_VAULT;1.1;AES256
+#   ...

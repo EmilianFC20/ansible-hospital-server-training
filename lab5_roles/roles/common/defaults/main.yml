@@ -1,0 +1,11 @@
+---
+common_packages:
+  - curl
+  - wget
+  - vim
+  - htop
+  - chrony
+  - fail2ban
+  - unattended-upgrades
+
+system_timezone: "UTC"

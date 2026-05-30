@@ -1,0 +1,26 @@
+# Ansible runtime
+*.retry
+
+# Decommission reports (generated locally — may contain sensitive server data)
+lab6_decommission/decommission_reports/
+
+# Ansible Vault password files — never commit these
+.vault_pass
+.vault_pass.txt
+*.vault_pass*
+
+# Environment files
+.env
+.env.*
+
+# Logs
+*.log
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

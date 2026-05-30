@@ -1,0 +1,7 @@
+---
+hospital_admin_user: med-admin
+allowed_ports:
+  - port: "22"
+    proto: tcp
+  - port: "80"
+    proto: tcp

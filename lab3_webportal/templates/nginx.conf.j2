@@ -1,0 +1,28 @@
+server {
+    listen {{ web_port }};
+    server_name {{ ansible_hostname }};
+
+    root {{ web_root }};
+    index index.html;
+
+    # Hospital patient portal
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # Health check endpoint (used by monitoring)
+    location /health {
+        access_log off;
+        return 200 "OK\n";
+        add_header Content-Type text/plain;
+    }
+
+    # Security headers required for medical data handling
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
+    add_header X-XSS-Protection "1; mode=block";
+    add_header Referrer-Policy "strict-origin-when-cross-origin";
+
+    # Hide Nginx version
+    server_tokens off;
+}

@@ -1,0 +1,6 @@
+---
+ansible_python_interpreter: /usr/bin/python3
+
+# Prefer SSH key auth (ssh-copy-id) over passwords.
+# If you must use passwords, encrypt them with ansible-vault:
+#   ansible-vault encrypt_string 'MyPassword' --name 'ansible_ssh_pass'

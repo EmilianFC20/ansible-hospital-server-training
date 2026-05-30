@@ -1,0 +1,83 @@
+---
+- name: Hospital System Maintenance & Compliance Logging
+  hosts: all
+  become: yes
+
+  vars:
+    log_retention_days: 14
+    health_report_path: /var/log/hospital_health.txt
+
+  tasks:
+    - name: Configure logrotate for hospital system logs
+      copy:
+        dest: /etc/logrotate.d/hospital
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          /var/log/syslog
+          /var/log/auth.log {
+              daily
+              rotate {{ log_retention_days }}
+              compress
+              delaycompress
+              missingok
+              notifempty
+              sharedscripts
+              postrotate
+                  /usr/lib/rsyslog/rsyslog-rotate
+              endscript
+          }
+
+    - name: Schedule daily server health check
+      cron:
+        name: "Hospital daily health report"
+        minute: "0"
+        hour: "6"
+        job: >
+          echo "=== $(date) ===" > {{ health_report_path }} &&
+          df -h >> {{ health_report_path }} &&
+          free -m >> {{ health_report_path }} &&
+          systemctl list-units --type=service --state=failed >> {{ health_report_path }}
+        user: root
+        state: present
+
+    - name: Ensure rsyslog is running
+      service:
+        name: rsyslog
+        state: started
+        enabled: yes
+
+    - name: Install auditd for compliance logging
+      apt:
+        name: auditd
+        state: present
+        update_cache: yes
+
+    - name: Ensure auditd is running
+      service:
+        name: auditd
+        state: started
+        enabled: yes
+
+    - name: Add audit rules for sensitive file access
+      copy:
+        dest: /etc/audit/rules.d/hospital.rules
+        owner: root
+        group: root
+        mode: '0640'
+        content: |
+          # Monitor access to password files
+          -w /etc/passwd -p wa -k hospital_auth
+          -w /etc/shadow -p wa -k hospital_auth
+          # Monitor SSH config changes
+          -w /etc/ssh/sshd_config -p wa -k hospital_ssh
+          # Monitor sudo usage
+          -w /var/log/sudo.log -p wa -k hospital_sudo
+      notify: Restart auditd
+
+  handlers:
+    - name: Restart auditd
+      service:
+        name: auditd
+        state: restarted

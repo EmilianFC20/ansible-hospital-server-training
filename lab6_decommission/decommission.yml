@@ -1,0 +1,247 @@
+---
+# Hospital Server Decommission Playbook
+#
+# DESTRUCTIVE — read README.md before running.
+#
+# Required vars:
+#   target_host           - inventory hostname to decommission
+#   confirm_decommission  - must be set to true (safety gate)
+#
+# Optional vars:
+#   confirm_shutdown      - set to true to also power off the server
+
+- name: Pre-flight safety gate
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+    - name: Abort if target_host was not specified
+      assert:
+        that: target_host is defined
+        fail_msg: >
+          No target specified. Run with:
+          -e "target_host=<hostname> confirm_decommission=true"
+
+    - name: Abort if decommission was not explicitly confirmed
+      assert:
+        that: confirm_decommission | default(false) | bool
+        fail_msg: >
+          Decommission not confirmed. Add: -e "confirm_decommission=true"
+          Review README.md before proceeding.
+
+
+- name: Safety gate and pre-decommission snapshot
+  hosts: "{{ target_host }}"
+  gather_facts: yes
+
+  tasks:
+    - name: Collect pre-decommission system snapshot
+      shell: "{{ item.cmd }}"
+      loop:
+        - { label: "hostname",     cmd: "hostname -f" }
+        - { label: "uptime",       cmd: "uptime" }
+        - { label: "active users", cmd: "who" }
+        - { label: "disk usage",   cmd: "df -h" }
+        - { label: "memory",       cmd: "free -m" }
+        - { label: "running svcs", cmd: "systemctl list-units --type=service --state=running --no-pager" }
+        - { label: "local users",  cmd: "awk -F: '$3 >= 1000 && $3 < 65534 {print $1, $3, $6}' /etc/passwd" }
+        - { label: "sudoers",      cmd: "grep -r '' /etc/sudoers.d/ 2>/dev/null || true" }
+      register: snapshot_results
+      changed_when: false
+      become: yes
+
+    - name: Ensure local report directory exists
+      file:
+        path: "{{ playbook_dir }}/decommission_reports"
+        state: directory
+        mode: '0750'
+      delegate_to: localhost
+
+    - name: Save snapshot report locally
+      copy:
+        dest: "{{ playbook_dir }}/decommission_reports/{{ ansible_hostname }}_{{ ansible_date_time.date }}.txt"
+        content: |
+          ============================================================
+          HOSPITAL SERVER DECOMMISSION REPORT
+          Host:    {{ ansible_hostname }} ({{ ansible_host }})
+          Date:    {{ ansible_date_time.iso8601 }}
+          OS:      {{ ansible_distribution }} {{ ansible_distribution_version }}
+          ============================================================
+
+          {% for item in snapshot_results.results %}
+          --- {{ item.item.label | upper }} ---
+          {{ item.stdout }}
+
+          {% endfor %}
+      delegate_to: localhost
+
+    - name: Display report path
+      debug:
+        msg: "Snapshot saved to decommission_reports/{{ ansible_hostname }}_{{ ansible_date_time.date }}.txt"
+      delegate_to: localhost
+
+
+- name: Stop and disable services
+  hosts: "{{ target_host }}"
+  become: yes
+  gather_facts: no
+
+  vars:
+    hospital_services:
+      - nginx
+      - apache2
+      - mysql
+      - postgresql
+
+  tasks:
+    - name: Stop hospital application services
+      service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop: "{{ hospital_services }}"
+      ignore_errors: yes
+
+    - name: Get list of non-system user accounts (for session kill)
+      shell: "awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd"
+      register: active_users
+      changed_when: false
+
+    - name: Kill any remaining user sessions
+      shell: "pkill -u {{ item }} || true"
+      loop: "{{ active_users.stdout_lines }}"
+      when: active_users.stdout_lines | length > 0
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Confirm all application ports are closed
+      shell: "ss -tlnp | grep -E ':(80|443|3306|5432) ' || echo 'All closed'"
+      register: open_ports
+      changed_when: false
+
+    - name: Show port status
+      debug:
+        msg: "{{ open_ports.stdout_lines }}"
+
+
+- name: Revoke user access
+  hosts: "{{ target_host }}"
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Get list of non-system user accounts
+      shell: "awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd"
+      register: local_users
+      changed_when: false
+
+    - name: Lock all non-system user accounts
+      user:
+        name: "{{ item }}"
+        password_lock: yes
+      loop: "{{ local_users.stdout_lines }}"
+      when: local_users.stdout_lines | length > 0
+
+    - name: Clear authorized SSH keys for all users
+      shell: |
+        find /home -maxdepth 2 -name "authorized_keys" -exec truncate -s 0 {} \;
+        truncate -s 0 /root/.ssh/authorized_keys 2>/dev/null || true
+      changed_when: true
+
+    - name: Remove non-system users from sudo group
+      shell: "gpasswd -d {{ item }} sudo 2>/dev/null || true"
+      loop: "{{ local_users.stdout_lines }}"
+      changed_when: false
+      when: local_users.stdout_lines | length > 0
+
+    - name: Disable cron for all non-system users
+      cron:
+        name: ".*"
+        user: "{{ item }}"
+        state: absent
+      loop: "{{ local_users.stdout_lines }}"
+      when: local_users.stdout_lines | length > 0
+      ignore_errors: yes
+
+
+- name: Clear sensitive data
+  hosts: "{{ target_host }}"
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Shred bash history for all user home directories
+      shell: |
+        find /home -maxdepth 2 -name ".bash_history" -exec shred -u {} \;
+        [ -f /root/.bash_history ] && shred -u /root/.bash_history || true
+      changed_when: true
+
+    - name: Flush systemd journal logs
+      shell: "journalctl --rotate && journalctl --vacuum-time=1s"
+      changed_when: true
+
+    - name: Clear /tmp
+      shell: "find /tmp -mindepth 1 -delete"
+      changed_when: true
+
+    - name: Remove application config files with potential credentials
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/mysql/debian.cnf
+        - /root/.my.cnf
+        - /root/.pgpass
+      ignore_errors: yes
+
+
+- name: Apply decommission MOTD and shutdown
+  hosts: "{{ target_host }}"
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Write decommission MOTD
+      copy:
+        dest: /etc/motd
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          =====================================================
+            THIS SERVER HAS BEEN DECOMMISSIONED
+          =====================================================
+            Hostname : {{ ansible_hostname }}
+            Date     : {{ ansible_date_time.date }}
+            Action   : Decommissioned by Hospital IT Operations
+
+            DO NOT USE — contact IT Operations if you see this.
+          =====================================================
+
+    - name: Disable MOTD dynamic updates
+      file:
+        path: /etc/update-motd.d
+        state: directory
+        mode: '0000'
+      ignore_errors: yes
+
+    - name: Final decommission confirmation in syslog
+      shell: "logger -t hospital-ansible 'SERVER DECOMMISSIONED: {{ ansible_hostname }} on {{ ansible_date_time.iso8601 }}'"
+      changed_when: true
+
+    - name: Schedule shutdown in 1 minute
+      shell: "shutdown -h +1 'Server decommissioned by Ansible — IT Operations'"
+      async: 0
+      poll: 0
+      ignore_errors: yes
+      when: confirm_shutdown | default(false) | bool
+
+    - name: Notify shutdown status
+      debug:
+        msg: >-
+          {% if confirm_shutdown | default(false) | bool %}
+          Server will shut down in 1 minute.
+          {% else %}
+          Decommission complete. Server is still running.
+          Pass -e "confirm_shutdown=true" to also power it off.
+          {% endif %}
